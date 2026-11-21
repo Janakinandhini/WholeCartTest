@@ -6,7 +6,7 @@ using static Microsoft.Playwright.Assertions;
 namespace WholeCart.Automation;
 
 internal sealed record Product(string Sku, string Name, string Seller, string SellerAccount);
-internal sealed record DeliverySlot(string Date, string Time);
+internal sealed record DeliverySlot(string Date, string StartTime, string EndTime);
 internal sealed record CartLine(Product Product, decimal Net, decimal Tax, int Pieces, int StockBefore, string ProductUrl);
 
 internal sealed class WholeCartUi(IPage page)
@@ -15,8 +15,10 @@ internal sealed class WholeCartUi(IPage page)
     private static readonly Regex CasePrice = new(@"Case of\s+(\d+):\s*₹\s*([\d,.]+)");
     private static readonly Regex TaxRate = new(@"Tax\s+([\d.]+)%");
     private static readonly Regex Stock = new(@"In stock:\s*(-?\d+)\s+pieces");
-    private static readonly Regex SlotTime = new(@"\d{2}:\d{2}\s*[–-]\s*\d{2}:\d{2}");
+    private static readonly Regex SlotTime = new(@"(\d{2}:\d{2})\s*[–-]\s*(\d{2}:\d{2})");
     private static readonly Regex Money = new(@"₹\s*([\d,.]+)");
+    private static readonly Regex LogisticsExport = new("^Logistics export$", RegexOptions.IgnoreCase);
+    private static readonly Regex Sellers = new("^Sellers$", RegexOptions.IgnoreCase);
     private static readonly Regex MinimumOrderMessage = new(
         @"minimum\b|below\s+(?:the\s+)?(?:order\s+)?minimum|at\s+least\s+₹?\s*2,?000",
         RegexOptions.IgnoreCase);
@@ -35,6 +37,33 @@ internal sealed class WholeCartUi(IPage page)
     {
         await page.GetByRole(AriaRole.Link, new() { Name = link, Exact = true }).ClickAsync();
         await Expect(Heading(heading)).ToBeVisibleAsync();
+    }
+
+    public async Task CheckOperatorNavigationAsync(bool available)
+    {
+        foreach (var name in new[] { Sellers, LogisticsExport })
+        {
+            var control = Control(name);
+            if (available)
+                await Expect(control).ToBeVisibleAsync();
+            else
+                await Expect(control).ToHaveCountAsync(0);
+        }
+    }
+
+    public async Task CheckOperatorSellerListAsync(params string[] sellers)
+    {
+        await Control(Sellers).ClickAsync();
+        await Expect(Heading("Sellers")).ToBeVisibleAsync();
+        foreach (var seller in sellers)
+            await Expect(RowWithCell(seller)).ToBeVisibleAsync();
+    }
+
+    public async Task DownloadLogisticsExportAsync(string path)
+    {
+        var download = await page.RunAndWaitForDownloadAsync(() => Control(LogisticsExport).ClickAsync());
+        Assert.That(Path.GetExtension(download.SuggestedFilename), Is.EqualTo(".csv").IgnoreCase);
+        await download.SaveAsAsync(path);
     }
 
     public async Task RequireEmptyCartAsync()
@@ -158,7 +187,7 @@ internal sealed class WholeCartUi(IPage page)
             var time = SlotTime.Match(label);
             Assert.That(time.Success, Is.True, $"Could not read the delivery time from '{label}'.");
             await radio.CheckAsync();
-            return new DeliverySlot(date, time.Value);
+            return new DeliverySlot(date, time.Groups[1].Value, time.Groups[2].Value);
         }
 
         throw new AssertionException("No available delivery slot in the next seven store dates.");
@@ -220,8 +249,7 @@ internal sealed class WholeCartUi(IPage page)
 
     public async Task CheckOrderSummaryAsync(string order, DeliverySlot slot, decimal total)
     {
-        var times = Regex.Matches(slot.Time, @"\d{2}:\d{2}").Select(match => match.Value).ToArray();
-        var delivery = new Regex($@"^{Regex.Escape(slot.Date)}\s+{times[0]}\s*[–-]\s*{times[1]}$");
+        var delivery = new Regex($@"^{Regex.Escape(slot.Date)}\s+{slot.StartTime}\s*[–-]\s*{slot.EndTime}$");
         await Expect(OrderRow(order).GetByRole(AriaRole.Cell, new() { NameRegex = delivery })).ToBeVisibleAsync();
         await Expect(OrderRow(order).GetByRole(AriaRole.Cell, new() { NameRegex = MoneyText(total) }))
             .ToBeVisibleAsync();

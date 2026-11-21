@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Text;
+using Microsoft.VisualBasic.FileIO;
 using Microsoft.Playwright;
 using NUnit.Framework.Interfaces;
 
@@ -104,7 +107,7 @@ public class OrderFlowTests
     }
 
     [Test]
-    [Category("OrderFlow")]
+    [Category("EndToEnd")]
     public async Task MultiSellerCheckoutCreatesTwoOrdersThatCanBeDeliveredAndInvoiced()
     {
         var buyer = await SignInAsync("buyer1");
@@ -146,7 +149,7 @@ public class OrderFlowTests
     }
 
     [Test]
-    [Category("OrderFlow")]
+    [Category("EndToEnd")]
     [Category("Cancellation")]
     public async Task SellerCancellationOfAcceptedOrderAppearsInBuyerHistory()
     {
@@ -174,7 +177,7 @@ public class OrderFlowTests
     }
 
     [Test]
-    [Category("OrderFlow")]
+    [Category("EndToEnd")]
     [Category("CheckoutValidation")]
     public async Task CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies()
     {
@@ -196,7 +199,7 @@ public class OrderFlowTests
     }
 
     [Test]
-    [Category("OrderFlow")]
+    [Category("EndToEnd")]
     [Category("Cancellation")]
     public async Task BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount()
     {
@@ -220,6 +223,93 @@ public class OrderFlowTests
         await CaptureAsync("buyer2", "buyer-cancellation-confirmed");
         await buyer.ExpectStockAsync(line, line.StockBefore);
         await CaptureAsync("buyer2", "stock-after-cancellation");
+    }
+
+    [Test]
+    [Category("EndToEnd")]
+    [Category("Operator")]
+    public async Task AcceptedOrderAppearsInOperatorLogisticsExport()
+    {
+        var buyer = await SignInAsync("buyer2");
+        var seller = await SignInAsync(Coffee.SellerAccount);
+        var dispatcher = await SignInAsync("operator");
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var line = await buyer.AddCasesAsync(Coffee, MinimumOrderNet);
+        var slot = await buyer.OpenCheckoutAsync(Coffee.Name);
+        var total = await buyer.CheckSellerQuoteAsync(line);
+        await buyer.PlaceOrderAsync();
+        var orderNumbers = await buyer.FindNewOrdersAsync(previousOrders, 1);
+        var order = await buyer.FindSellerOrderAsync(orderNumbers, Coffee.Seller, total, slot);
+
+        await seller.OpenAsync("Orders", "Orders");
+        await seller.CheckOrderSummaryAsync(order, slot, total);
+        await seller.ChangeStatusAsync(order, "Accept", "accepted");
+        await buyer.RefreshStatusAsync(order, "accepted");
+        await CaptureAsync(Coffee.SellerAccount, "order-accepted-for-dispatch");
+        await CaptureAsync("buyer2", "accepted-order-delivery-slot");
+
+        await CaptureAsync("operator", "logistics-export-control");
+        var csvPath = Path.Combine(_evidenceDirectory, "logistics.csv");
+        await dispatcher.DownloadLogisticsExportAsync(csvPath);
+        TestContext.AddTestAttachment(csvPath, "Operator logistics export");
+        CheckLogisticsExport(csvPath, order, slot, line.Pieces);
+    }
+
+    [Test]
+    [Category("EndToEnd")]
+    [Category("Operator")]
+    public async Task OperatorNavigationIsVisibleOnlyToTheOperator()
+    {
+        var dispatcher = await SignInAsync("operator");
+        await dispatcher.CheckOperatorNavigationAsync(available: true);
+        await CaptureAsync("operator", "operator-navigation");
+        await dispatcher.CheckOperatorSellerListAsync("WholeCart Direct", Coffee.Seller, Tea.Seller);
+        await CaptureAsync("operator", "marketplace-sellers");
+
+        var buyer = await SignInAsync("buyer1");
+        await buyer.CheckOperatorNavigationAsync(available: false);
+        await CaptureAsync("buyer1", "buyer-navigation");
+
+        var seller = await SignInAsync(Coffee.SellerAccount);
+        await seller.CheckOperatorNavigationAsync(available: false);
+        await CaptureAsync(Coffee.SellerAccount, "seller-navigation");
+    }
+
+    private static void CheckLogisticsExport(string path, string order, DeliverySlot slot, int pieces)
+    {
+        var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        var csv = utf8.GetString(File.ReadAllBytes(path)).TrimStart('\uFEFF');
+        using var parser = new TextFieldParser(new StringReader(csv))
+        {
+            HasFieldsEnclosedInQuotes = true,
+            TrimWhiteSpace = false
+        };
+        parser.SetDelimiters(",");
+        string[] columns =
+            ["order_number", "buyer_name", "delivery_address", "delivery_date", "slot_start", "slot_end", "pieces"];
+        Assert.That(parser.ReadFields(), Is.EqualTo(columns), "IF-02 defines the logistics CSV column order.");
+
+        var matches = new List<string[]>();
+        while (parser.ReadFields() is { } row)
+        {
+            if (row.Length > 0 && row[0] == order)
+                matches.Add(row);
+        }
+
+        Assert.That(matches, Has.Count.EqualTo(1), $"Expected one logistics row for accepted order {order}.");
+        var exported = matches[0];
+        Assert.That(exported, Has.Length.EqualTo(columns.Length));
+        Assert.Multiple(() =>
+        {
+            Assert.That(exported[1], Is.EqualTo("Café Dosa Corner"), "Buyer name");
+            Assert.That(exported[2].Trim(), Is.Not.Empty, "Delivery address");
+            Assert.That(exported[3], Is.EqualTo(slot.Date), "Delivery date");
+            Assert.That(exported[4], Is.EqualTo(slot.StartTime), "Slot start (DEF-14)");
+            Assert.That(exported[5], Is.EqualTo(slot.EndTime), "Slot end (DEF-14)");
+            Assert.That(exported[6], Is.EqualTo(pieces.ToString(CultureInfo.InvariantCulture)), "Piece count");
+        });
     }
 
     private static async Task FulfilAsync(WholeCartUi seller, WholeCartUi buyer, string order,

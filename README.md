@@ -47,6 +47,8 @@ Key findings:
 | `SellerCancellationOfAcceptedOrderAppearsInBuyerHistory` | A seller accepts and cancels a newly placed order. The buyer sees the same status in history and on the order detail page. Regression for BR-12/13 and DEF-22. |
 | `BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount` | Checkout deducts the exact number of pieces ordered. Immediate buyer cancellation updates history and restores the original piece count (BR-01, BR-11). |
 | `CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies` | Checkout explains the per-seller ₹2,000 net minimum and creates no sub-orders when one seller falls below it, even though the combined cart qualifies (CR-07, DEF-12). |
+| `AcceptedOrderAppearsInOperatorLogisticsExport` | A buyer places an order, a seller accepts it, and the operator downloads logistics CSV. Checks the required column order and the order's buyer name, delivery date, slot start and end, and piece count (IF-02, DEF-14). |
+| `OperatorNavigationIsVisibleOnlyToTheOperator` | The operator can view the marketplace sellers and sees the logistics export control. Buyer and seller navigation omit both controls. This test covers UI visibility. |
 | `TestBuyerLoginAndNavigation` | Buyer reaches authenticated navigation and opens the catalogue. |
 
 ### Set up and run
@@ -73,11 +75,13 @@ Run the full suite with one command.
 dotnet test automation/WholeCart.Automation --results-directory TestResults --logger "trx;LogFileName=wholecart.trx"
 ```
 
-Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. It defaults to the candidate URL above. Set `WHOLECART_HEADED=1` to watch the browser. To run only the checkout-to-invoice path, add `--filter 'FullyQualifiedName~MultiSellerCheckout'`.
+Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. It defaults to the candidate URL above. Set `WHOLECART_HEADED=1` to watch the browser. To run the end-to-end tests, add `--filter 'TestCategory=EndToEnd'`. To run only the checkout-to-invoice path, add `--filter 'FullyQualifiedName~MultiSellerCheckout'`.
+
+To run the two operator tests, use `--filter 'TestCategory=Operator'`.
 
 ### Test data and diagnostics
 
-The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation, `buyer3` for minimum-order validation, and the sellers assigned to the two SKUs below. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation and logistics orders, `buyer3` for minimum-order validation, the sellers assigned to the two SKUs below, and `operator` for dispatch and seller navigation. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
 
 | SKU | Product | Seller |
 |---|---|---|
@@ -88,7 +92,7 @@ Run against the assigned test instance. The tests run serially, create real test
 
 ### Save screenshots and video
 
-Screenshots are saved automatically at checkout, delivery, invoice, cancellation, stock and validation checkpoints. Failed tests also capture the current page of each actor. Use the command below to save screenshots and WebM recordings from every browser session in a known folder.
+Screenshots are saved automatically at checkout, delivery, invoice, cancellation, stock, validation and operator checkpoints. Failed tests also capture the current page of each actor. The logistics test attaches the downloaded CSV. Use the command below to save the evidence and WebM recordings from every browser session in a known folder.
 
 ```bash
 WHOLECART_VIDEO=1 WHOLECART_EVIDENCE_DIR="$PWD/TestResults/evidence" \
