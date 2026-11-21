@@ -39,26 +39,50 @@ Key findings:
 - **DEF-07** (Major): Tax invoices missing mandatory CR-09 supply details
 - **DEF-12** (Major): Minimum order threshold not enforced at ₹2,000 per CR-07
 
-## Running Automation Tests
+## Round Two — End-to-End Order Flow
 
-### Prerequisites
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- Playwright browsers
+| Test | What it verifies |
+|---|---|
+| `MultiSellerCheckoutCreatesTwoOrdersThatCanBeDeliveredAndInvoiced` | Buyer adds cases from two sellers, verifies checkout totals and a delivery slot, and creates two sub-orders from one checkout. Each seller independently accepts, ships and delivers its sub-order. Buyer history shows each transition and each invoice matches its order total. Covers BR-05, BR-07–09, BR-13, BR-19 and BR-22. |
+| `SellerCancellationOfAcceptedOrderAppearsInBuyerHistory` | A seller accepts and cancels a newly placed order. The buyer sees the same status in history and on the order detail page. Regression for BR-12/13 and DEF-22. |
+| `TestBuyerLoginAndNavigation` | Buyer reaches authenticated navigation and opens the catalogue. |
 
-### Setup & Run
+### Set up and run
+
+Use the .NET 8 SDK and PowerShell 7 (`pwsh`) to install Playwright's pinned Chromium version. From the repository root, run the following setup once.
+
 ```bash
-cd automation/WholeCart.Automation
-
-# Restore packages
-dotnet restore
-
-# Install Playwright browsers
-dotnet build
-pwsh bin/Debug/net8.0/playwright.ps1 install chromium
-
-# Run tests
-dotnet test
+dotnet build automation/WholeCart.Automation
+pwsh automation/WholeCart.Automation/bin/Debug/net8.0/playwright.ps1 install chromium
 ```
+
+Set `WHOLECART_PASSWORD` in your shell using the password from the assignment email. In bash or zsh, this prompts without echoing the password.
+
+```bash
+printf 'WholeCart test password: '
+read -rs WHOLECART_PASSWORD
+printf '\n'
+export WHOLECART_PASSWORD
+```
+
+Run the full suite with one command.
+
+```bash
+dotnet test automation/WholeCart.Automation --results-directory TestResults --logger "trx;LogFileName=wholecart.trx"
+```
+
+Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. It defaults to the candidate URL above. Set `WHOLECART_HEADED=1` to watch the browser. To run only the checkout-to-invoice path, add `--filter 'FullyQualifiedName~MultiSellerCheckout'`.
+
+### Test data and diagnostics
+
+The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation, and the sellers assigned to the two SKUs below. Start with both buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+
+| SKU | Product | Seller |
+|---|---|---|
+| SKU-0381 | Chef's Cold Coffee | FreshFarm Foods (`seller2`) |
+| SKU-0392 | Daily Iced Tea | Coastal Beverages (`seller3`) |
+
+Run against the assigned test instance. The tests run serially, create real test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. If a run stops before checkout, remove the test items left in that buyer's cart before rerunning. A cancellation status mismatch fails the test and should be compared with DEF-22. A failing run attaches browser screenshots for the active actors to the results.
 
 ## Test Accounts
 
@@ -72,7 +96,7 @@ dotnet test
 | Seller | seller3 | Coastal Beverages |
 | Operator | operator | — |
 
-**Password for all accounts:** `Test@123`
+Use the shared test password from the assignment email.
 
 ## AI Tools Used
 
