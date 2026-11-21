@@ -10,10 +10,10 @@ namespace WholeCart.Automation;
 [NonParallelizable]
 public class OrderFlowTests
 {
-    private const decimal MinimumOrderNet = 2_000m;
-    private const decimal FreeDeliveryNet = 3_000m;
-    private static readonly Product Coffee = new("SKU-0381", "Chef's Cold Coffee", "FreshFarm Foods", "seller2");
-    private static readonly Product Tea = new("SKU-0392", "Daily Iced Tea", "Coastal Beverages", "seller3");
+    private static WholeCartTestData Data => WholeCartTestData.Current;
+    private static Product Coffee => Data.Products.Coffee;
+    private static Product Tea => Data.Products.Tea;
+    private static Product ToorDal => Data.Products.ToorDal;
 
     private static readonly string RunId = $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
     private readonly List<(string Actor, IBrowserContext Context, IPage Page)> _sessions = [];
@@ -27,21 +27,7 @@ public class OrderFlowTests
     [SetUp]
     public async Task StartBrowser()
     {
-        var endpoint = Environment.GetEnvironmentVariable("WHOLECART_BASE_URL");
-        if (string.IsNullOrWhiteSpace(endpoint))
-            endpoint = "http://13.200.185.1/c/janaki-47b177/";
-
-        if (!Uri.TryCreate(endpoint.TrimEnd('/') + "/", UriKind.Absolute, out var baseUrl) ||
-            baseUrl.Scheme is not ("http" or "https"))
-        {
-            throw new InvalidOperationException("WHOLECART_BASE_URL must be an HTTP(S) application URL.");
-        }
-
-        _baseUrl = baseUrl;
-        _password = Environment.GetEnvironmentVariable("WHOLECART_PASSWORD")
-            ?? throw new InvalidOperationException("Set WHOLECART_PASSWORD to the assignment test password.");
-        if (string.IsNullOrWhiteSpace(_password))
-            throw new InvalidOperationException("WHOLECART_PASSWORD must contain the assignment test password.");
+        (_baseUrl, _password) = TestSettings.FromEnvironment();
 
         var evidenceRoot = Environment.GetEnvironmentVariable("WHOLECART_EVIDENCE_DIR");
         if (string.IsNullOrWhiteSpace(evidenceRoot))
@@ -101,28 +87,28 @@ public class OrderFlowTests
     [Category("Smoke")]
     public async Task TestBuyerLoginAndNavigation()
     {
-        var buyer = await SignInAsync("buyer1");
+        var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
         await buyer.OpenAsync("Catalogue", "Catalogue");
-        await CaptureAsync("buyer1", "catalogue");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "catalogue");
     }
 
     [Test]
     [Category("EndToEnd")]
     public async Task MultiSellerCheckoutCreatesTwoOrdersThatCanBeDeliveredAndInvoiced()
     {
-        var buyer = await SignInAsync("buyer1");
+        var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
         var freshFarm = await SignInAsync(Coffee.SellerAccount);
         var coastal = await SignInAsync(Tea.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
         await buyer.RequireEmptyCartAsync();
 
-        var coffeeLine = await buyer.AddCasesAsync(Coffee, FreeDeliveryNet);
-        var teaLine = await buyer.AddCasesAsync(Tea, FreeDeliveryNet);
+        var coffeeLine = await buyer.AddCasesAsync(Coffee, Data.Checkout.FreeDeliveryNet);
+        var teaLine = await buyer.AddCasesAsync(Tea, Data.Checkout.FreeDeliveryNet);
         var checkout = await buyer.OpenCheckoutAsync(Coffee.Name, Tea.Name);
         var coffeeTotal = await buyer.CheckSellerQuoteAsync(coffeeLine, expectFreeDelivery: true);
         var teaTotal = await buyer.CheckSellerQuoteAsync(teaLine, expectFreeDelivery: true);
         await buyer.CheckGrandTotalAsync(coffeeTotal + teaTotal);
-        await CaptureAsync("buyer1", "checkout");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "checkout");
 
         await buyer.PlaceOrderAsync();
         var orderNumbers = await buyer.FindNewOrdersAsync(previousOrders, 2);
@@ -131,21 +117,52 @@ public class OrderFlowTests
         Assert.That(coffeeOrder[..coffeeOrder.LastIndexOf('-')],
             Is.EqualTo(teaOrder[..teaOrder.LastIndexOf('-')]),
             "The two sub-orders should share the checkout number.");
-        await CaptureAsync("buyer1", "sub-orders-placed");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "sub-orders-placed");
         await buyer.RequireEmptyCartAsync();
         await buyer.OpenAsync("Orders", "Order history");
 
         await FulfilAsync(freshFarm, buyer, coffeeOrder, checkout, coffeeTotal);
         await buyer.ExpectStatusAsync(teaOrder, "placed");
         await FulfilAsync(coastal, buyer, teaOrder, checkout, teaTotal);
-        await CaptureAsync("buyer1", "sub-orders-delivered");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "sub-orders-delivered");
         await CaptureAsync(Coffee.SellerAccount, "seller-order-delivered");
         await CaptureAsync(Tea.SellerAccount, "seller-order-delivered");
 
         await buyer.CheckInvoiceAsync(coffeeOrder, Coffee, coffeeTotal);
-        await CaptureAsync("buyer1", "freshfarm-invoice");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "freshfarm-invoice");
         await buyer.CheckInvoiceAsync(teaOrder, Tea, teaTotal);
-        await CaptureAsync("buyer1", "coastal-invoice");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "coastal-invoice");
+    }
+
+    [Test]
+    [Category("EndToEnd")]
+    public async Task BuyerChecksOutWithPiecesAndCasesOfTheSameProduct()
+    {
+        var username = Data.Buyers.Buyer1.Username;
+        var buyer = await SignInAsync(username);
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var cases = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
+        var pieceQuantity = Data.Checkout.MixedCartPieceQuantity;
+        Assert.That(cases.StockBefore, Is.GreaterThan(cases.Pieces + pieceQuantity),
+            "This fixture needs stock for both cart lines and enough to keep the product visible after checkout.");
+        var pieces = await buyer.AddPiecesAsync(Coffee, pieceQuantity);
+        await buyer.CheckCartLineAsync(cases);
+        await CaptureAsync(username, "pieces-and-cases-in-cart");
+
+        var slot = await buyer.OpenCheckoutAsync(Coffee.Name);
+        var total = await buyer.CheckSellerQuoteAsync([cases, pieces]);
+        await buyer.CheckGrandTotalAsync(total);
+        await buyer.PlaceOrderAsync();
+        var orders = await buyer.FindNewOrdersAsync(previousOrders, 1);
+        var order = await buyer.FindSellerOrderAsync(orders, Coffee.Seller, total, slot);
+        await buyer.CheckPlacedOrderLinesAsync(order, cases, pieces);
+        await CaptureAsync(username, "pieces-and-cases-in-order");
+
+        await buyer.RequireEmptyCartAsync();
+        await buyer.ExpectStockAsync(cases, cases.StockBefore - cases.Pieces - pieces.Pieces);
+        await CaptureAsync(username, "stock-after-mixed-unit-checkout");
     }
 
     [Test]
@@ -153,12 +170,14 @@ public class OrderFlowTests
     [Category("Cancellation")]
     public async Task SellerCancellationOfAcceptedOrderAppearsInBuyerHistory()
     {
-        var buyer = await SignInAsync("buyer2");
+        var buyer = await SignInAsync(Data.Buyers.Buyer2.Username);
         var seller = await SignInAsync(Coffee.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
         await buyer.RequireEmptyCartAsync();
 
-        var line = await buyer.AddCasesAsync(Coffee, MinimumOrderNet);
+        var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
+        Assert.That(line.StockBefore, Is.GreaterThan(line.Pieces),
+            "This fixture needs enough stock for the product to stay visible after checkout.");
         var checkout = await buyer.OpenCheckoutAsync(Coffee.Name);
         var total = await buyer.CheckSellerQuoteAsync(line);
 
@@ -169,11 +188,17 @@ public class OrderFlowTests
         await seller.ExpectStatusAsync(order, "placed");
         await seller.ChangeStatusAsync(order, "Accept", "accepted");
         await buyer.RefreshStatusAsync(order, "accepted");
+        await buyer.ExpectStockAsync(line, line.StockBefore - line.Pieces);
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "stock-before-seller-cancellation");
+        await buyer.OpenAsync("Orders", "Order history");
+
         await seller.ChangeStatusAsync(order, "Cancel", "cancelled");
         await CaptureAsync(Coffee.SellerAccount, "seller-order-cancelled");
         await buyer.RefreshStatusAsync(order, "cancelled");
         await buyer.CheckOrderDetailStatusAsync(order, "cancelled");
-        await CaptureAsync("buyer2", "buyer-order-cancelled");
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "buyer-order-cancelled");
+        await buyer.ExpectStockAsync(line, line.StockBefore);
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "stock-after-seller-cancellation");
     }
 
     [Test]
@@ -181,18 +206,18 @@ public class OrderFlowTests
     [Category("CheckoutValidation")]
     public async Task CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies()
     {
-        var buyer = await SignInAsync("buyer3");
+        var buyer = await SignInAsync(Data.Buyers.Buyer3.Username);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
         await buyer.RequireEmptyCartAsync();
 
-        var belowMinimum = await buyer.AddCasesAsync(Coffee, 1_000m);
-        var qualifying = await buyer.AddCasesAsync(Tea, MinimumOrderNet);
-        Assert.That(belowMinimum.Net, Is.LessThan(MinimumOrderNet), "FreshFarm must be below the CR-07 minimum.");
-        Assert.That(qualifying.Net, Is.GreaterThanOrEqualTo(MinimumOrderNet));
-        Assert.That(belowMinimum.Net + qualifying.Net, Is.GreaterThan(MinimumOrderNet));
+        var belowMinimum = await buyer.AddCasesAsync(Coffee, Data.Checkout.BelowMinimumNetTarget);
+        var qualifying = await buyer.AddCasesAsync(Tea, Data.Checkout.MinimumOrderNet);
+        Assert.That(belowMinimum.Net, Is.LessThan(Data.Checkout.MinimumOrderNet), "FreshFarm must be below the CR-07 minimum.");
+        Assert.That(qualifying.Net, Is.GreaterThanOrEqualTo(Data.Checkout.MinimumOrderNet));
+        Assert.That(belowMinimum.Net + qualifying.Net, Is.GreaterThan(Data.Checkout.MinimumOrderNet));
 
-        await buyer.CheckMinimumOrderRejectionAsync(Coffee.Name, Tea.Name);
-        await CaptureAsync("buyer3", "per-seller-minimum-rejection");
+        await buyer.CheckMinimumOrderRejectionAsync(Data.Checkout.MinimumMessage(), Coffee.Name, Tea.Name);
+        await CaptureAsync(Data.Buyers.Buyer3.Username, "per-seller-minimum-rejection");
         var currentOrders = await buyer.ReadOrderNumbersAsync();
         Assert.That(currentOrders, Is.EquivalentTo(previousOrders),
             "A rejected checkout must create no seller sub-orders.");
@@ -200,14 +225,45 @@ public class OrderFlowTests
 
     [Test]
     [Category("EndToEnd")]
-    [Category("Cancellation")]
-    public async Task BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount()
+    public async Task BuyerCannotChangeDeliverySlotAfterSellerShipsOrder()
     {
-        var buyer = await SignInAsync("buyer2");
+        var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
+        var seller = await SignInAsync(Tea.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
         await buyer.RequireEmptyCartAsync();
 
-        var line = await buyer.AddCasesAsync(Coffee, MinimumOrderNet);
+        var line = await buyer.AddCasesAsync(Tea, Data.Checkout.MinimumOrderNet);
+        var originalSlot = await buyer.OpenCheckoutAsync(Tea.Name);
+        var total = await buyer.CheckSellerQuoteAsync(line);
+        await buyer.PlaceOrderAsync();
+        var orders = await buyer.FindNewOrdersAsync(previousOrders, 1);
+        var order = await buyer.FindSellerOrderAsync(orders, Tea.Seller, total, originalSlot);
+
+        await seller.OpenAsync("Orders", "Orders");
+        await seller.ChangeStatusAsync(order, "Accept", "accepted");
+        await seller.ChangeStatusAsync(order, "Ship", "shipped");
+        await buyer.RefreshStatusAsync(order, "shipped");
+        await buyer.CheckSlotChangeBlockedAsync(order, originalSlot);
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "post-shipment-slot-change-blocked");
+
+        await buyer.OpenAsync("Orders", "Order history");
+        await buyer.ExpectStatusAsync(order, "shipped");
+        await buyer.CheckOrderSummaryAsync(order, originalSlot, total);
+        await seller.RefreshStatusAsync(order, "shipped");
+        await seller.CheckOrderSummaryAsync(order, originalSlot, total);
+        await CaptureAsync(Tea.SellerAccount, "original-shipped-slot");
+    }
+
+    [Test]
+    [Category("EndToEnd")]
+    [Category("Cancellation")]
+    public async Task BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount()
+    {
+        var buyer = await SignInAsync(Data.Buyers.Buyer2.Username);
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         Assert.That(line.StockBefore, Is.GreaterThan(line.Pieces),
             "This fixture needs enough stock for the product to stay visible after checkout.");
         var checkout = await buyer.OpenCheckoutAsync(Coffee.Name);
@@ -217,12 +273,12 @@ public class OrderFlowTests
         var order = await buyer.FindSellerOrderAsync(orderNumbers, Coffee.Seller, total, checkout);
 
         await buyer.ExpectStockAsync(line, line.StockBefore - line.Pieces);
-        await CaptureAsync("buyer2", "stock-after-checkout");
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "stock-after-checkout");
         await buyer.OpenAsync("Orders", "Order history");
         await buyer.CancelAsBuyerAsync(order);
-        await CaptureAsync("buyer2", "buyer-cancellation-confirmed");
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "buyer-cancellation-confirmed");
         await buyer.ExpectStockAsync(line, line.StockBefore);
-        await CaptureAsync("buyer2", "stock-after-cancellation");
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "stock-after-cancellation");
     }
 
     [Test]
@@ -230,13 +286,13 @@ public class OrderFlowTests
     [Category("Operator")]
     public async Task AcceptedOrderAppearsInOperatorLogisticsExport()
     {
-        var buyer = await SignInAsync("buyer2");
+        var buyer = await SignInAsync(Data.Buyers.Buyer2.Username);
         var seller = await SignInAsync(Coffee.SellerAccount);
-        var dispatcher = await SignInAsync("operator");
+        var dispatcher = await SignInAsync(Data.OperatorAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
         await buyer.RequireEmptyCartAsync();
 
-        var line = await buyer.AddCasesAsync(Coffee, MinimumOrderNet);
+        var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         var slot = await buyer.OpenCheckoutAsync(Coffee.Name);
         var total = await buyer.CheckSellerQuoteAsync(line);
         await buyer.PlaceOrderAsync();
@@ -248,9 +304,9 @@ public class OrderFlowTests
         await seller.ChangeStatusAsync(order, "Accept", "accepted");
         await buyer.RefreshStatusAsync(order, "accepted");
         await CaptureAsync(Coffee.SellerAccount, "order-accepted-for-dispatch");
-        await CaptureAsync("buyer2", "accepted-order-delivery-slot");
+        await CaptureAsync(Data.Buyers.Buyer2.Username, "accepted-order-delivery-slot");
 
-        await CaptureAsync("operator", "logistics-export-control");
+        await CaptureAsync(Data.OperatorAccount, "logistics-export-control");
         var csvPath = Path.Combine(_evidenceDirectory, "logistics.csv");
         await dispatcher.DownloadLogisticsExportAsync(csvPath);
         TestContext.AddTestAttachment(csvPath, "Operator logistics export");
@@ -262,19 +318,64 @@ public class OrderFlowTests
     [Category("Operator")]
     public async Task OperatorNavigationIsVisibleOnlyToTheOperator()
     {
-        var dispatcher = await SignInAsync("operator");
+        var dispatcher = await SignInAsync(Data.OperatorAccount);
         await dispatcher.CheckOperatorNavigationAsync(available: true);
-        await CaptureAsync("operator", "operator-navigation");
-        await dispatcher.CheckOperatorSellerListAsync("WholeCart Direct", Coffee.Seller, Tea.Seller);
-        await CaptureAsync("operator", "marketplace-sellers");
+        await CaptureAsync(Data.OperatorAccount, "operator-navigation");
+        await dispatcher.CheckOperatorSellerListAsync(ToorDal.Seller, Coffee.Seller, Tea.Seller);
+        await CaptureAsync(Data.OperatorAccount, "marketplace-sellers");
 
-        var buyer = await SignInAsync("buyer1");
+        var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
         await buyer.CheckOperatorNavigationAsync(available: false);
-        await CaptureAsync("buyer1", "buyer-navigation");
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "buyer-navigation");
 
         var seller = await SignInAsync(Coffee.SellerAccount);
         await seller.CheckOperatorNavigationAsync(available: false);
         await CaptureAsync(Coffee.SellerAccount, "seller-navigation");
+    }
+
+    [Test]
+    [Category("EndToEnd")]
+    [Category("Redelivery")]
+    public async Task WholeCartDirectReshipsAndDeliversAfterBuyerRequestsRedelivery()
+    {
+        var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
+        var seller = await SignInAsync(ToorDal.SellerAccount);
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var line = await buyer.AddCasesAsync(ToorDal, Data.Checkout.MinimumOrderNet);
+        var originalSlot = await buyer.OpenCheckoutAsync(ToorDal.Name);
+        var total = await buyer.CheckSellerQuoteAsync(line);
+        await buyer.PlaceOrderAsync();
+        var orders = await buyer.FindNewOrdersAsync(previousOrders, 1);
+        var order = await buyer.FindSellerOrderAsync(orders, ToorDal.Seller, total, originalSlot);
+
+        await seller.OpenAsync("Orders", "Orders");
+        await seller.ExpectStatusAsync(order, "placed");
+        await seller.CheckOrderSummaryAsync(order, originalSlot, total);
+        await seller.ChangeStatusAsync(order, "Accept", "accepted");
+        await seller.ChangeStatusAsync(order, "Ship", "shipped");
+        await buyer.RefreshStatusAsync(order, "shipped");
+        await seller.ChangeStatusAsync(order, "(?:Mark (?:as )?)?(?:Fail(?:ed)?(?: delivery)?|Delivery failed)",
+            "delivery failed");
+        await CaptureAsync(ToorDal.SellerAccount, "delivery-failed");
+        await buyer.RefreshStatusAsync(order, "delivery failed");
+
+        var newSlot = await buyer.RequestRedeliveryAsync(order, originalSlot);
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "redelivery-requested");
+        await buyer.OpenAsync("Orders", "Order history");
+        await buyer.ExpectStatusAsync(order, "redelivery requested");
+        await buyer.CheckOrderSummaryAsync(order, newSlot, total);
+        await seller.RefreshStatusAsync(order, "redelivery requested");
+        await seller.CheckOrderSummaryAsync(order, newSlot, total);
+        await CaptureAsync(ToorDal.SellerAccount, "redelivery-slot-confirmed");
+
+        await seller.ChangeStatusAsync(order, "(?:Re[- ]?)?Ship", "shipped");
+        await buyer.RefreshStatusAsync(order, "shipped");
+        await seller.ChangeStatusAsync(order, "(?:Mark (?:as )?)?Deliver(?:ed)?", "delivered");
+        await buyer.RefreshStatusAsync(order, "delivered");
+        await buyer.CheckOrderSummaryAsync(order, newSlot, total);
+        await CaptureAsync(Data.Buyers.Buyer1.Username, "redelivery-completed");
     }
 
     private static void CheckLogisticsExport(string path, string order, DeliverySlot slot, int pieces)
@@ -303,7 +404,7 @@ public class OrderFlowTests
         Assert.That(exported, Has.Length.EqualTo(columns.Length));
         Assert.Multiple(() =>
         {
-            Assert.That(exported[1], Is.EqualTo("Café Dosa Corner"), "Buyer name");
+            Assert.That(exported[1], Is.EqualTo(Data.Buyers.Buyer2.BusinessName), "Buyer name");
             Assert.That(exported[2].Trim(), Is.Not.Empty, "Delivery address");
             Assert.That(exported[3], Is.EqualTo(slot.Date), "Delivery date");
             Assert.That(exported[4], Is.EqualTo(slot.StartTime), "Slot start (DEF-14)");

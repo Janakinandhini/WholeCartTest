@@ -41,15 +41,29 @@ Key findings:
 
 ## Round Two — End-to-End Order Flow
 
+The [test case log](docs/test-case-log.md) lists the UI and API scenarios, accounts, and expected results.
+
 | Test | What it verifies |
 |---|---|
 | `MultiSellerCheckoutCreatesTwoOrdersThatCanBeDeliveredAndInvoiced` | Buyer adds cases from two sellers, verifies checkout totals and a delivery slot, and creates two sub-orders from one checkout. Each seller independently accepts, ships and delivers its sub-order. Buyer history shows each transition and each invoice matches its order total. Covers BR-05, BR-07–09, BR-13, BR-19 and BR-22. |
-| `SellerCancellationOfAcceptedOrderAppearsInBuyerHistory` | A seller accepts and cancels a newly placed order. The buyer sees the same status in history and on the order detail page. Regression for BR-12/13 and DEF-22. |
+| `BuyerChecksOutWithPiecesAndCasesOfTheSameProduct` | Individual pieces and cases of the same product remain separate lines in the cart and in one placed order. Checkout totals include both lines, and stock drops by their combined piece count (BR-01, BR-07). |
+| `SellerCancellationOfAcceptedOrderAppearsInBuyerHistory` | A seller accepts and cancels a newly placed order. The buyer sees the cancelled status in history and details, and stock returns to its pre-order piece count (BR-11–13, DEF-22). |
 | `BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount` | Checkout deducts the exact number of pieces ordered. Immediate buyer cancellation updates history and restores the original piece count (BR-01, BR-11). |
 | `CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies` | Checkout explains the per-seller ₹2,000 net minimum and creates no sub-orders when one seller falls below it, even though the combined cart qualifies (CR-07, DEF-12). |
+| `BuyerCannotChangeDeliverySlotAfterSellerShipsOrder` | Checkout creates a new order and the seller ships it. The buyer cannot change the slot, and both roles still see the original delivery window and shipped status (BR-15). |
 | `AcceptedOrderAppearsInOperatorLogisticsExport` | A buyer places an order, a seller accepts it, and the operator downloads logistics CSV. Checks the required column order and the order's buyer name, delivery date, slot start and end, and piece count (IF-02, DEF-14). |
 | `OperatorNavigationIsVisibleOnlyToTheOperator` | The operator can view the marketplace sellers and sees the logistics export control. Buyer and seller navigation omit both controls. This test covers UI visibility. |
+| `WholeCartDirectReshipsAndDeliversAfterBuyerRequestsRedelivery` | Buyer places a WholeCart Direct order. Seller1 accepts and ships it, records a failed delivery, then reships and delivers after the buyer requests a different time window. Both roles see the new slot (BR-13, BR-14). |
 | `TestBuyerLoginAndNavigation` | Buyer reaches authenticated navigation and opens the catalogue. |
+
+### API tests
+
+The [API tests](automation/WholeCart.Automation/Api) use HTTP requests and run without Chromium.
+
+| Test | What it verifies |
+|---|---|
+| `BuyerChecksOutAndCancelsItsOwnOrderViaApi` | Buyer adds cases, checks out into an available slot, verifies that order history shows one new order and the cart is empty, then cancels the order and checks its persisted status. |
+| `CheckoutApiRejectsCartWhenOnlyOneSellerMissesTheMinimum` | Checkout rejects a qualifying combined cart when one seller is below ₹2,000 and creates no orders (CR-07, DEF-12). |
 
 ### Set up and run
 
@@ -78,15 +92,27 @@ dotnet test automation/WholeCart.Automation --results-directory TestResults --lo
 Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. It defaults to the candidate URL above. Set `WHOLECART_HEADED=1` to watch the browser. To run the end-to-end tests, add `--filter 'TestCategory=EndToEnd'`. To run only the checkout-to-invoice path, add `--filter 'FullyQualifiedName~MultiSellerCheckout'`.
 
 To run the two operator tests, use `--filter 'TestCategory=Operator'`.
+To run the WholeCart Direct redelivery regression, use `--filter 'TestCategory=Redelivery'`.
+
+Run only the API tests with `WHOLECART_PASSWORD` set.
+
+```bash
+dotnet test automation/WholeCart.Automation --filter 'TestCategory=Api' --results-directory TestResults --logger "trx;LogFileName=wholecart-api.trx"
+```
+
+Start with empty carts for `buyer1` and `buyer2`. The API tests remove the cart lines they add. The checkout test leaves its cancelled order in history. The API tests look for slots starting tomorrow in India. If the operator has fixed the test store clock to a different date, set `WHOLECART_STORE_DATE` to that date in `yyyy-MM-dd` format. Checkout responses are saved as test attachments under the same evidence root as the browser tests.
 
 ### Test data and diagnostics
 
-The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation and logistics orders, `buyer3` for minimum-order validation, the sellers assigned to the two SKUs below, and `operator` for dispatch and seller navigation. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+The UI and API tests load account names, product fixtures, and checkout amounts from [TestData/wholecart.json](automation/WholeCart.Automation/TestData/wholecart.json). Update that file if the assigned build uses different test data. The build copies it into the test output directory. Set the password separately through `WHOLECART_PASSWORD`.
 
-| SKU | Product | Seller |
+The suite uses separate browser sessions for all seven accounts. It uses `buyer1` for fulfilment and redelivery, `buyer2` for cancellation and logistics orders, `buyer3` for minimum-order validation, the three sellers listed below, and `operator` for dispatch and seller navigation. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+
+| Catalogue search | Product | Seller |
 |---|---|---|
 | SKU-0381 | Chef's Cold Coffee | FreshFarm Foods (`seller2`) |
 | SKU-0392 | Daily Iced Tea | Coastal Beverages (`seller3`) |
+| Hill Toor Dal | Hill Toor Dal | WholeCart Direct (`seller1`) |
 
 Run against the assigned test instance. The tests run serially, create real test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. The minimum-order rejection leaves its items in `buyer3`'s cart. Clear those items before rerunning that case. If a run stops before checkout, clear any test items that remain in that buyer's cart. Compare rejection and cancellation failures with DEF-12 and DEF-22.
 

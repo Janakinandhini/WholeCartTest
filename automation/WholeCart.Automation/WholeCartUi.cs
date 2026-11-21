@@ -5,23 +5,21 @@ using static Microsoft.Playwright.Assertions;
 
 namespace WholeCart.Automation;
 
-internal sealed record Product(string Sku, string Name, string Seller, string SellerAccount);
 internal sealed record DeliverySlot(string Date, string StartTime, string EndTime);
-internal sealed record CartLine(Product Product, decimal Net, decimal Tax, int Pieces, int StockBefore, string ProductUrl);
+internal sealed record CartLine(Product Product, string Unit, int Quantity, decimal Net, decimal TaxRate, int Pieces,
+    int StockBefore, string ProductUrl);
 
 internal sealed class WholeCartUi(IPage page)
 {
     private static readonly Regex OrderNumber = new(@"^WC-\d+-\d+$");
     private static readonly Regex CasePrice = new(@"Case of\s+(\d+):\s*₹\s*([\d,.]+)");
+    private static readonly Regex PiecePrice = new(@"Piece:\s*₹\s*([\d,.]+)");
     private static readonly Regex TaxRate = new(@"Tax\s+([\d.]+)%");
     private static readonly Regex Stock = new(@"In stock:\s*(-?\d+)\s+pieces");
     private static readonly Regex SlotTime = new(@"(\d{2}:\d{2})\s*[–-]\s*(\d{2}:\d{2})");
     private static readonly Regex Money = new(@"₹\s*([\d,.]+)");
     private static readonly Regex LogisticsExport = new("^Logistics export$", RegexOptions.IgnoreCase);
     private static readonly Regex Sellers = new("^Sellers$", RegexOptions.IgnoreCase);
-    private static readonly Regex MinimumOrderMessage = new(
-        @"minimum\b|below\s+(?:the\s+)?(?:order\s+)?minimum|at\s+least\s+₹?\s*2,?000",
-        RegexOptions.IgnoreCase);
 
     public async Task SignInAsync(Uri endpoint, string username, string password)
     {
@@ -77,46 +75,59 @@ internal sealed class WholeCartUi(IPage page)
         }), "The cart must have no existing product lines.").ToHaveCountAsync(0);
     }
 
-    public async Task<CartLine> AddCasesAsync(Product product, decimal minimumNet)
+    public Task<CartLine> AddCasesAsync(Product product, decimal minimumNet) =>
+        AddToCartAsync(product, "case", price => (int)Math.Ceiling(minimumNet / price));
+
+    public Task<CartLine> AddPiecesAsync(Product product, int quantity) =>
+        AddToCartAsync(product, "piece", _ => quantity);
+
+    private async Task<CartLine> AddToCartAsync(Product product, string unit, Func<decimal, int> getQuantity)
     {
         await OpenAsync("Catalogue", "Catalogue");
-        await page.GetByPlaceholder("Search name or SKU", new() { Exact = true }).FillAsync(product.Sku);
+        await page.GetByPlaceholder("Search name or SKU", new() { Exact = true }).FillAsync(product.CatalogueQuery);
         await Button("Search").ClickAsync();
-        var result = RowWithCell(product.Sku);
+        var result = RowWithCell(product.CatalogueQuery);
         await result.GetByRole(AriaRole.Link, new() { Name = product.Name, Exact = true }).ClickAsync();
         await Expect(Heading(product.Name)).ToBeVisibleAsync();
         await Expect(page.GetByText($"Sold by {product.Seller}")).ToBeVisibleAsync();
 
-        var priceText = await page.GetByText(CasePrice).InnerTextAsync();
-        var casePrice = CasePrice.Match(priceText);
+        var pricePattern = unit == "case" ? CasePrice : PiecePrice;
+        var priceText = await page.GetByText(pricePattern).InnerTextAsync();
+        var priceMatch = pricePattern.Match(priceText);
         var taxRate = TaxRate.Match(priceText);
         if (!taxRate.Success)
             taxRate = TaxRate.Match(await page.GetByText(TaxRate).InnerTextAsync());
-        Assert.That(casePrice.Success && taxRate.Success, Is.True, "Expected a case price and tax rate.");
+        Assert.That(priceMatch.Success && taxRate.Success, Is.True, $"Expected a {unit} price and tax rate.");
 
-        var unitsPerCase = int.Parse(casePrice.Groups[1].Value, CultureInfo.InvariantCulture);
-        var price = ParseDecimal(casePrice.Groups[2].Value);
-        Assert.That(price, Is.Positive, $"{product.Sku} must have a positive case price.");
-        var quantity = (int)Math.Ceiling(minimumNet / price);
+        var piecesPerUnit = unit == "case" ? int.Parse(priceMatch.Groups[1].Value, CultureInfo.InvariantCulture) : 1;
+        var price = ParseDecimal(priceMatch.Groups[^1].Value);
+        Assert.That(price, Is.Positive, $"{product.Name} must have a positive {unit} price.");
+        var quantity = getQuantity(price);
         var inStock = await ReadStockAsync();
         var productUrl = page.Url;
-        Assert.That(quantity, Is.InRange(1, 99), $"The quantity for {product.Sku} must fit one cart line.");
-        Assert.That(inStock, Is.GreaterThanOrEqualTo(quantity * unitsPerCase),
-            $"{product.Sku} needs {quantity * unitsPerCase} pieces for this test.");
+        Assert.That(quantity, Is.InRange(1, 99), $"The quantity for {product.Name} must fit one cart line.");
+        var pieces = quantity * piecesPerUnit;
+        Assert.That(inStock, Is.GreaterThanOrEqualTo(pieces), $"{product.Name} needs {pieces} pieces for this test.");
 
         var form = page.Locator("form").Filter(new() { Has = Button("Add to cart") });
-        await form.GetByRole(AriaRole.Combobox).SelectOptionAsync(new SelectOptionValue { Label = "Case" });
+        var label = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(unit);
+        await form.GetByRole(AriaRole.Combobox).SelectOptionAsync(new SelectOptionValue { Label = label });
         await form.GetByRole(AriaRole.Spinbutton).FillAsync(quantity.ToString(CultureInfo.InvariantCulture));
         await Button("Add to cart").ClickAsync();
         await OpenAsync("Cart", "Cart");
-        var cartRow = RowWithCell(product.Name);
-        await Expect(cartRow.GetByRole(AriaRole.Cell, new() { Name = "case", Exact = true })).ToBeVisibleAsync();
-        await Expect(cartRow.Locator("input[type=number], select"))
-            .ToHaveValueAsync(quantity.ToString(CultureInfo.InvariantCulture));
-        var net = quantity * price;
-        await Expect(cartRow.GetByRole(AriaRole.Cell).Last).ToHaveTextAsync(MoneyText(net));
-        var tax = Math.Round(net * ParseDecimal(taxRate.Groups[1].Value) / 100m, 2, MidpointRounding.AwayFromZero);
-        return new CartLine(product, net, tax, quantity * unitsPerCase, inStock, productUrl);
+        var line = new CartLine(product, unit, quantity, quantity * price, ParseDecimal(taxRate.Groups[1].Value),
+            pieces, inStock, productUrl);
+        await CheckCartLineAsync(line);
+        return line;
+    }
+
+    public async Task CheckCartLineAsync(CartLine line)
+    {
+        var row = ProductUnitRow(line);
+        await Expect(row).ToBeVisibleAsync();
+        await Expect(row.Locator("input[type=number], select"))
+            .ToHaveValueAsync(line.Quantity.ToString(CultureInfo.InvariantCulture));
+        await Expect(row.GetByRole(AriaRole.Cell).Last).ToHaveTextAsync(MoneyText(line.Net));
     }
 
     public async Task<DeliverySlot> OpenCheckoutAsync(params string[] products)
@@ -125,7 +136,7 @@ internal sealed class WholeCartUi(IPage page)
         return await SelectDeliverySlotAsync();
     }
 
-    public async Task CheckMinimumOrderRejectionAsync(params string[] products)
+    public async Task CheckMinimumOrderRejectionAsync(Regex minimumMessage, params string[] products)
     {
         await OpenCheckoutPageAsync(products);
         var submit = Button("Place order");
@@ -136,7 +147,7 @@ internal sealed class WholeCartUi(IPage page)
                 await submit.ClickAsync();
         }
 
-        var notice = page.Locator("main").GetByText(MinimumOrderMessage).Filter(new()
+        var notice = page.Locator("main").GetByText(minimumMessage).Filter(new()
         {
             Visible = true
         });
@@ -148,7 +159,7 @@ internal sealed class WholeCartUi(IPage page)
     {
         await page.GotoAsync(line.ProductUrl);
         await Expect(page.GetByText(new Regex($@"In stock:\s*{expected}\s+pieces")),
-            $"Expected {line.Product.Sku} to have {expected} pieces in stock.").ToBeVisibleAsync();
+            $"Expected {line.Product.Name} to have {expected} pieces in stock.").ToBeVisibleAsync();
     }
 
     private async Task<int> ReadStockAsync() =>
@@ -159,7 +170,7 @@ internal sealed class WholeCartUi(IPage page)
     {
         await OpenAsync("Cart", "Cart");
         foreach (var product in products)
-            await Expect(RowWithCell(product)).ToBeVisibleAsync();
+            await Expect(RowWithCell(product).First).ToBeVisibleAsync();
 
         await Control(new Regex("^Proceed to checkout$")).ClickAsync();
         await Expect(Heading("Checkout")).ToBeVisibleAsync();
@@ -193,15 +204,21 @@ internal sealed class WholeCartUi(IPage page)
         throw new AssertionException("No available delivery slot in the next seven store dates.");
     }
 
-    public async Task<decimal> CheckSellerQuoteAsync(CartLine line, bool expectFreeDelivery = false)
+    public Task<decimal> CheckSellerQuoteAsync(CartLine line, bool expectFreeDelivery = false) =>
+        CheckSellerQuoteAsync([line], expectFreeDelivery);
+
+    public async Task<decimal> CheckSellerQuoteAsync(CartLine[] lines, bool expectFreeDelivery = false)
     {
-        var cells = RowWithCell(line.Product.Seller).GetByRole(AriaRole.Cell);
-        await Expect(cells.Nth(1)).ToHaveTextAsync(MoneyText(line.Net));
-        await Expect(cells.Nth(2)).ToHaveTextAsync(MoneyText(line.Tax));
+        var net = lines.Sum(line => line.Net);
+        var tax = lines.GroupBy(line => line.TaxRate).Sum(group =>
+            Math.Round(group.Sum(line => line.Net) * group.Key / 100m, 2, MidpointRounding.AwayFromZero));
+        var cells = RowWithCell(lines[0].Product.Seller).GetByRole(AriaRole.Cell);
+        await Expect(cells.Nth(1)).ToHaveTextAsync(MoneyText(net));
+        await Expect(cells.Nth(2)).ToHaveTextAsync(MoneyText(tax));
         var fee = ReadMoney(await cells.Nth(3).InnerTextAsync());
         if (expectFreeDelivery)
-            Assert.That(fee, Is.Zero, "BR-08 waives the delivery fee at or above ₹3,000 net.");
-        var total = line.Net + line.Tax + fee;
+            Assert.That(fee, Is.Zero, "BR-08 waives the delivery fee when the seller's net meets the threshold.");
+        var total = net + tax + fee;
         await Expect(cells.Nth(4)).ToHaveTextAsync(MoneyText(total));
         return total;
     }
@@ -258,7 +275,7 @@ internal sealed class WholeCartUi(IPage page)
     public Task ExpectStatusAsync(string order, string status) =>
         Expect(OrderRow(order).GetByRole(AriaRole.Cell, new()
         {
-            NameRegex = new Regex($"^{Regex.Escape(status)}$", RegexOptions.IgnoreCase)
+            NameRegex = new Regex($"^{StatusPattern(status)}$", RegexOptions.IgnoreCase)
         }), $"Expected order {order} to be {status}.").ToBeVisibleAsync();
 
     public async Task RefreshStatusAsync(string order, string status)
@@ -310,8 +327,72 @@ internal sealed class WholeCartUi(IPage page)
     public async Task CheckOrderDetailStatusAsync(string order, string status)
     {
         await Control(new Regex("^View$"), OrderRow(order)).ClickAsync();
+        await ExpectOrderDetailStatusAsync(order, status);
+    }
+
+    public async Task CheckPlacedOrderLinesAsync(string order, params CartLine[] lines)
+    {
+        await CheckOrderDetailStatusAsync(order, "placed");
+        foreach (var line in lines)
+        {
+            var cells = ProductUnitRow(line).GetByRole(AriaRole.Cell);
+            await Expect(cells.Nth(2)).ToHaveTextAsync(line.Quantity.ToString(CultureInfo.InvariantCulture));
+            await Expect(cells.Last).ToHaveTextAsync(MoneyText(line.Net));
+        }
+    }
+
+    public async Task<DeliverySlot> RequestRedeliveryAsync(string order, DeliverySlot originalSlot)
+    {
+        await CheckOrderDetailStatusAsync(order, "delivery failed");
+        var request = Button("Request redelivery");
+        var newSlot = await SelectAlternativeDeliverySlotAsync(request, originalSlot);
+        await ClickWithConfirmationAsync(request);
+        await ExpectOrderDetailStatusAsync(order, "redelivery requested");
+        return newSlot;
+    }
+
+    public async Task CheckSlotChangeBlockedAsync(string order, DeliverySlot originalSlot)
+    {
+        await CheckOrderDetailStatusAsync(order, "shipped");
+        var change = Button("Change slot");
+        if (!await change.IsVisibleAsync() || !await change.IsEnabledAsync())
+            return;
+
+        await SelectAlternativeDeliverySlotAsync(change, originalSlot);
+        await ClickWithConfirmationAsync(change);
+        var rejection = new Regex(
+            @"slot can only be changed before .*ship|(?:cannot|can't) change .*slot.*ship|order has already shipped",
+            RegexOptions.IgnoreCase);
+        await Expect(page.GetByText(rejection), "BR-15 blocks slot changes after shipment.").ToBeVisibleAsync();
+    }
+
+    private async Task<DeliverySlot> SelectAlternativeDeliverySlotAsync(ILocator action, DeliverySlot originalSlot)
+    {
+        var form = page.Locator("form").Filter(new() { Has = action });
+        var dateInput = form.Locator("input[type=date]");
+        var slotSelect = form.GetByRole(AriaRole.Combobox);
+
+        // Keep the future delivery date and request a different time window.
+        await dateInput.FillAsync(originalSlot.Date);
+        var options = await slotSelect.Locator("option:enabled").AllAsync();
+        foreach (var option in options)
+        {
+            var label = (await option.InnerTextAsync()).Trim();
+            var time = SlotTime.Match(label);
+            if (!time.Success || time.Groups[1].Value == originalSlot.StartTime)
+                continue;
+
+            await slotSelect.SelectOptionAsync(new SelectOptionValue { Label = label });
+            return new DeliverySlot(originalSlot.Date, time.Groups[1].Value, time.Groups[2].Value);
+        }
+
+        throw new AssertionException($"No alternative delivery window for {originalSlot.Date} was offered.");
+    }
+
+    private async Task ExpectOrderDetailStatusAsync(string order, string status)
+    {
         await Expect(Heading($"Order {order}")).ToBeVisibleAsync();
-        await Expect(page.GetByText(new Regex($@"Status:\s*{Regex.Escape(status)}\b", RegexOptions.IgnoreCase)))
+        await Expect(page.GetByText(new Regex($@"Status:\s*{StatusPattern(status)}\b", RegexOptions.IgnoreCase)))
             .ToBeVisibleAsync();
     }
 
@@ -359,6 +440,14 @@ internal sealed class WholeCartUi(IPage page)
     });
 
     private ILocator OrderRow(string order) => RowWithCell(order);
+
+    private ILocator ProductUnitRow(CartLine line) => RowWithCell(line.Product.Name).Filter(new()
+    {
+        Has = page.GetByRole(AriaRole.Cell, new() { Name = line.Unit, Exact = true })
+    });
+
+    private static string StatusPattern(string status) =>
+        string.Join(@"[\s_-]+", status.Split(' ').Select(Regex.Escape));
 
     private static Regex MoneyText(decimal amount) => new($"^{MoneyPattern(amount)}$");
 

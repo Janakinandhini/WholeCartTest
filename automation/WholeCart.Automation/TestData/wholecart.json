@@ -1,0 +1,43 @@
+{
+  "buyers": {
+    "buyer1": {
+      "username": "buyer1",
+      "businessName": "Spice Route Kitchen"
+    },
+    "buyer2": {
+      "username": "buyer2",
+      "businessName": "Café Dosa Corner"
+    },
+    "buyer3": {
+      "username": "buyer3",
+      "businessName": "शर्मा भोजनालय"
+    }
+  },
+  "operatorAccount": "operator",
+  "products": {
+    "coffee": {
+      "catalogueQuery": "SKU-0381",
+      "name": "Chef's Cold Coffee",
+      "seller": "FreshFarm Foods",
+      "sellerAccount": "seller2"
+    },
+    "tea": {
+      "catalogueQuery": "SKU-0392",
+      "name": "Daily Iced Tea",
+      "seller": "Coastal Beverages",
+      "sellerAccount": "seller3"
+    },
+    "toorDal": {
+      "catalogueQuery": "Hill Toor Dal",
+      "name": "Hill Toor Dal",
+      "seller": "WholeCart Direct",
+      "sellerAccount": "seller1"
+    }
+  },
+  "checkout": {
+    "minimumOrderNet": 2000,
+    "freeDeliveryNet": 3000,
+    "belowMinimumNetTarget": 1000,
+    "mixedCartPieceQuantity": 2
+  }
+}
