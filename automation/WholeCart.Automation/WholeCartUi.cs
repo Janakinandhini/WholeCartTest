@@ -7,7 +7,7 @@ namespace WholeCart.Automation;
 
 internal sealed record Product(string Sku, string Name, string Seller, string SellerAccount);
 internal sealed record DeliverySlot(string Date, string Time);
-internal sealed record CartLine(Product Product, decimal Net, decimal Tax);
+internal sealed record CartLine(Product Product, decimal Net, decimal Tax, int Pieces, int StockBefore, string ProductUrl);
 
 internal sealed class WholeCartUi(IPage page)
 {
@@ -17,6 +17,9 @@ internal sealed class WholeCartUi(IPage page)
     private static readonly Regex Stock = new(@"In stock:\s*(-?\d+)\s+pieces");
     private static readonly Regex SlotTime = new(@"\d{2}:\d{2}\s*[–-]\s*\d{2}:\d{2}");
     private static readonly Regex Money = new(@"₹\s*([\d,.]+)");
+    private static readonly Regex MinimumOrderMessage = new(
+        @"minimum\b|below\s+(?:the\s+)?(?:order\s+)?minimum|at\s+least\s+₹?\s*2,?000",
+        RegexOptions.IgnoreCase);
 
     public async Task SignInAsync(Uri endpoint, string username, string password)
     {
@@ -66,8 +69,8 @@ internal sealed class WholeCartUi(IPage page)
         var price = ParseDecimal(casePrice.Groups[2].Value);
         Assert.That(price, Is.Positive, $"{product.Sku} must have a positive case price.");
         var quantity = (int)Math.Ceiling(minimumNet / price);
-        var inStock = int.Parse(Stock.Match(await page.GetByText(Stock).InnerTextAsync()).Groups[1].Value,
-            CultureInfo.InvariantCulture);
+        var inStock = await ReadStockAsync();
+        var productUrl = page.Url;
         Assert.That(quantity, Is.InRange(1, 99), $"The quantity for {product.Sku} must fit one cart line.");
         Assert.That(inStock, Is.GreaterThanOrEqualTo(quantity * unitsPerCase),
             $"{product.Sku} needs {quantity * unitsPerCase} pieces for this test.");
@@ -83,11 +86,47 @@ internal sealed class WholeCartUi(IPage page)
             .ToHaveValueAsync(quantity.ToString(CultureInfo.InvariantCulture));
         var net = quantity * price;
         await Expect(cartRow.GetByRole(AriaRole.Cell).Last).ToHaveTextAsync(MoneyText(net));
-        return new CartLine(product, net,
-            Math.Round(net * ParseDecimal(taxRate.Groups[1].Value) / 100m, 2, MidpointRounding.AwayFromZero));
+        var tax = Math.Round(net * ParseDecimal(taxRate.Groups[1].Value) / 100m, 2, MidpointRounding.AwayFromZero);
+        return new CartLine(product, net, tax, quantity * unitsPerCase, inStock, productUrl);
     }
 
     public async Task<DeliverySlot> OpenCheckoutAsync(params string[] products)
+    {
+        await OpenCheckoutPageAsync(products);
+        return await SelectDeliverySlotAsync();
+    }
+
+    public async Task CheckMinimumOrderRejectionAsync(params string[] products)
+    {
+        await OpenCheckoutPageAsync(products);
+        var submit = Button("Place order");
+        if (await submit.IsVisibleAsync() && await submit.IsEnabledAsync())
+        {
+            await SelectDeliverySlotAsync();
+            if (await submit.IsEnabledAsync())
+                await submit.ClickAsync();
+        }
+
+        var notice = page.Locator("main").GetByText(MinimumOrderMessage).Filter(new()
+        {
+            Visible = true
+        });
+        await Expect(notice.First, "CR-07 requires a visible per-seller minimum order message.")
+            .ToBeVisibleAsync();
+    }
+
+    public async Task ExpectStockAsync(CartLine line, int expected)
+    {
+        await page.GotoAsync(line.ProductUrl);
+        await Expect(page.GetByText(new Regex($@"In stock:\s*{expected}\s+pieces")),
+            $"Expected {line.Product.Sku} to have {expected} pieces in stock.").ToBeVisibleAsync();
+    }
+
+    private async Task<int> ReadStockAsync() =>
+        int.Parse(Stock.Match(await page.GetByText(Stock).InnerTextAsync()).Groups[1].Value,
+            CultureInfo.InvariantCulture);
+
+    private async Task OpenCheckoutPageAsync(string[] products)
     {
         await OpenAsync("Cart", "Cart");
         foreach (var product in products)
@@ -95,6 +134,10 @@ internal sealed class WholeCartUi(IPage page)
 
         await Control(new Regex("^Proceed to checkout$")).ClickAsync();
         await Expect(Heading("Checkout")).ToBeVisibleAsync();
+    }
+
+    private async Task<DeliverySlot> SelectDeliverySlotAsync()
+    {
         var dateField = page.Locator("main input[type=date]");
         var storeDate = await dateField.GetAttributeAsync("min") ?? await dateField.InputValueAsync();
         var firstDate = DateOnly.ParseExact(storeDate, "yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -198,6 +241,25 @@ internal sealed class WholeCartUi(IPage page)
 
     public async Task ChangeStatusAsync(string order, string action, string status)
     {
+        var control = OrderRow(order).GetByRole(AriaRole.Button, new()
+        {
+            NameRegex = new Regex($"^(?:{action})$", RegexOptions.IgnoreCase)
+        });
+        await ClickWithConfirmationAsync(control);
+        await ExpectStatusAsync(order, status);
+    }
+
+    public async Task CancelAsBuyerAsync(string order)
+    {
+        await CheckOrderDetailStatusAsync(order, "placed");
+        await ClickWithConfirmationAsync(Button("Cancel order"));
+        await OpenAsync("Orders", "Order history");
+        await ExpectStatusAsync(order, "cancelled");
+        await CheckOrderDetailStatusAsync(order, "cancelled");
+    }
+
+    private async Task ClickWithConfirmationAsync(ILocator control)
+    {
         async void HandleDialog(object? sender, IDialog dialog)
         {
             if (dialog.Type == "confirm")
@@ -209,11 +271,7 @@ internal sealed class WholeCartUi(IPage page)
         page.Dialog += HandleDialog;
         try
         {
-            await OrderRow(order).GetByRole(AriaRole.Button, new()
-            {
-                NameRegex = new Regex($"^(?:{action})$", RegexOptions.IgnoreCase)
-            }).ClickAsync();
-            await ExpectStatusAsync(order, status);
+            await control.ClickAsync();
         }
         finally
         {

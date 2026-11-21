@@ -12,11 +12,14 @@ public class OrderFlowTests
     private static readonly Product Coffee = new("SKU-0381", "Chef's Cold Coffee", "FreshFarm Foods", "seller2");
     private static readonly Product Tea = new("SKU-0392", "Daily Iced Tea", "Coastal Beverages", "seller3");
 
-    private readonly List<(string Actor, IPage Page)> _sessions = [];
+    private static readonly string RunId = $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
+    private readonly List<(string Actor, IBrowserContext Context, IPage Page)> _sessions = [];
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private Uri _baseUrl = null!;
     private string _password = null!;
+    private string _evidenceDirectory = null!;
+    private bool _recordVideo;
 
     [SetUp]
     public async Task StartBrowser()
@@ -37,6 +40,14 @@ public class OrderFlowTests
         if (string.IsNullOrWhiteSpace(_password))
             throw new InvalidOperationException("WHOLECART_PASSWORD must contain the assignment test password.");
 
+        var evidenceRoot = Environment.GetEnvironmentVariable("WHOLECART_EVIDENCE_DIR");
+        if (string.IsNullOrWhiteSpace(evidenceRoot))
+            evidenceRoot = Path.Combine(TestContext.CurrentContext.WorkDirectory, "TestResults", "evidence");
+        _evidenceDirectory = Path.GetFullPath(Path.Combine(evidenceRoot, RunId, TestContext.CurrentContext.Test.Name));
+        _recordVideo = Environment.GetEnvironmentVariable("WHOLECART_VIDEO") == "1";
+        Directory.CreateDirectory(_evidenceDirectory);
+        TestContext.Progress.WriteLine($"Browser evidence: {_evidenceDirectory}");
+
         _playwright = await Playwright.CreateAsync();
         _browser = await _playwright.Chromium.LaunchAsync(new()
         {
@@ -49,18 +60,37 @@ public class OrderFlowTests
     {
         try
         {
-            if (TestContext.CurrentContext.Result.Outcome.Status == TestStatus.Failed)
-                await AttachFailureScreenshotsAsync();
+            foreach (var (actor, context, page) in _sessions)
+            {
+                if (TestContext.CurrentContext.Result.Outcome.Status == TestStatus.Failed)
+                    await CaptureAsync(actor, "failure");
 
-            if (_browser is not null)
-                await _browser.CloseAsync();
+                var video = page.Video;
+                // Playwright finishes writing video when its browser context closes.
+                await context.CloseAsync();
+                if (video is not null)
+                {
+                    var source = await video.PathAsync();
+                    var path = Path.Combine(_evidenceDirectory, $"{actor}.webm");
+                    File.Move(source, path);
+                    TestContext.AddTestAttachment(path, $"{actor} browser recording");
+                }
+            }
         }
         finally
         {
             _sessions.Clear();
-            _browser = null;
-            _playwright?.Dispose();
-            _playwright = null;
+            try
+            {
+                if (_browser is not null)
+                    await _browser.CloseAsync();
+            }
+            finally
+            {
+                _browser = null;
+                _playwright?.Dispose();
+                _playwright = null;
+            }
         }
     }
 
@@ -70,6 +100,7 @@ public class OrderFlowTests
     {
         var buyer = await SignInAsync("buyer1");
         await buyer.OpenAsync("Catalogue", "Catalogue");
+        await CaptureAsync("buyer1", "catalogue");
     }
 
     [Test]
@@ -88,6 +119,7 @@ public class OrderFlowTests
         var coffeeTotal = await buyer.CheckSellerQuoteAsync(coffeeLine, expectFreeDelivery: true);
         var teaTotal = await buyer.CheckSellerQuoteAsync(teaLine, expectFreeDelivery: true);
         await buyer.CheckGrandTotalAsync(coffeeTotal + teaTotal);
+        await CaptureAsync("buyer1", "checkout");
 
         await buyer.PlaceOrderAsync();
         var orderNumbers = await buyer.FindNewOrdersAsync(previousOrders, 2);
@@ -96,15 +128,21 @@ public class OrderFlowTests
         Assert.That(coffeeOrder[..coffeeOrder.LastIndexOf('-')],
             Is.EqualTo(teaOrder[..teaOrder.LastIndexOf('-')]),
             "The two sub-orders should share the checkout number.");
+        await CaptureAsync("buyer1", "sub-orders-placed");
         await buyer.RequireEmptyCartAsync();
         await buyer.OpenAsync("Orders", "Order history");
 
         await FulfilAsync(freshFarm, buyer, coffeeOrder, checkout, coffeeTotal);
         await buyer.ExpectStatusAsync(teaOrder, "placed");
         await FulfilAsync(coastal, buyer, teaOrder, checkout, teaTotal);
+        await CaptureAsync("buyer1", "sub-orders-delivered");
+        await CaptureAsync(Coffee.SellerAccount, "seller-order-delivered");
+        await CaptureAsync(Tea.SellerAccount, "seller-order-delivered");
 
         await buyer.CheckInvoiceAsync(coffeeOrder, Coffee, coffeeTotal);
+        await CaptureAsync("buyer1", "freshfarm-invoice");
         await buyer.CheckInvoiceAsync(teaOrder, Tea, teaTotal);
+        await CaptureAsync("buyer1", "coastal-invoice");
     }
 
     [Test]
@@ -129,8 +167,59 @@ public class OrderFlowTests
         await seller.ChangeStatusAsync(order, "Accept", "accepted");
         await buyer.RefreshStatusAsync(order, "accepted");
         await seller.ChangeStatusAsync(order, "Cancel", "cancelled");
+        await CaptureAsync(Coffee.SellerAccount, "seller-order-cancelled");
         await buyer.RefreshStatusAsync(order, "cancelled");
         await buyer.CheckOrderDetailStatusAsync(order, "cancelled");
+        await CaptureAsync("buyer2", "buyer-order-cancelled");
+    }
+
+    [Test]
+    [Category("OrderFlow")]
+    [Category("CheckoutValidation")]
+    public async Task CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies()
+    {
+        var buyer = await SignInAsync("buyer3");
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var belowMinimum = await buyer.AddCasesAsync(Coffee, 1_000m);
+        var qualifying = await buyer.AddCasesAsync(Tea, MinimumOrderNet);
+        Assert.That(belowMinimum.Net, Is.LessThan(MinimumOrderNet), "FreshFarm must be below the CR-07 minimum.");
+        Assert.That(qualifying.Net, Is.GreaterThanOrEqualTo(MinimumOrderNet));
+        Assert.That(belowMinimum.Net + qualifying.Net, Is.GreaterThan(MinimumOrderNet));
+
+        await buyer.CheckMinimumOrderRejectionAsync(Coffee.Name, Tea.Name);
+        await CaptureAsync("buyer3", "per-seller-minimum-rejection");
+        var currentOrders = await buyer.ReadOrderNumbersAsync();
+        Assert.That(currentOrders, Is.EquivalentTo(previousOrders),
+            "A rejected checkout must create no seller sub-orders.");
+    }
+
+    [Test]
+    [Category("OrderFlow")]
+    [Category("Cancellation")]
+    public async Task BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount()
+    {
+        var buyer = await SignInAsync("buyer2");
+        var previousOrders = await buyer.ReadOrderNumbersAsync();
+        await buyer.RequireEmptyCartAsync();
+
+        var line = await buyer.AddCasesAsync(Coffee, MinimumOrderNet);
+        Assert.That(line.StockBefore, Is.GreaterThan(line.Pieces),
+            "This fixture needs enough stock for the product to stay visible after checkout.");
+        var checkout = await buyer.OpenCheckoutAsync(Coffee.Name);
+        var total = await buyer.CheckSellerQuoteAsync(line);
+        await buyer.PlaceOrderAsync();
+        var orderNumbers = await buyer.FindNewOrdersAsync(previousOrders, 1);
+        var order = await buyer.FindSellerOrderAsync(orderNumbers, Coffee.Seller, total, checkout);
+
+        await buyer.ExpectStockAsync(line, line.StockBefore - line.Pieces);
+        await CaptureAsync("buyer2", "stock-after-checkout");
+        await buyer.OpenAsync("Orders", "Order history");
+        await buyer.CancelAsBuyerAsync(order);
+        await CaptureAsync("buyer2", "buyer-cancellation-confirmed");
+        await buyer.ExpectStockAsync(line, line.StockBefore);
+        await CaptureAsync("buyer2", "stock-after-cancellation");
     }
 
     private static async Task FulfilAsync(WholeCartUi seller, WholeCartUi buyer, string order,
@@ -149,40 +238,40 @@ public class OrderFlowTests
 
     private async Task<WholeCartUi> SignInAsync(string username)
     {
-        var context = await _browser!.NewContextAsync();
+        var context = await _browser!.NewContextAsync(new()
+        {
+            RecordVideoDir = _recordVideo ? _evidenceDirectory : null
+        });
         var page = await context.NewPageAsync();
         page.SetDefaultTimeout(10_000);
-        _sessions.Add((username, page));
+        _sessions.Add((username, context, page));
 
         var app = new WholeCartUi(page);
         await app.SignInAsync(_baseUrl, username, _password);
         return app;
     }
 
-    private async Task AttachFailureScreenshotsAsync()
+    private async Task CaptureAsync(string actor, string checkpoint)
     {
-        foreach (var (actor, page) in _sessions)
-        {
-            if (page.IsClosed)
-                continue;
+        var page = _sessions.Single(session => session.Actor == actor).Page;
+        if (page.IsClosed)
+            return;
 
-            try
+        try
+        {
+            var path = Path.Combine(_evidenceDirectory, $"{actor}-{checkpoint}.png");
+            await page.ScreenshotAsync(new()
             {
-                var path = Path.Combine(TestContext.CurrentContext.WorkDirectory,
-                    $"{TestContext.CurrentContext.Test.Name}-{actor}.png");
-                await page.ScreenshotAsync(new()
-                {
-                    Path = path,
-                    FullPage = true,
-                    Timeout = 5_000,
-                    Mask = [page.GetByTestId("password")]
-                });
-                TestContext.AddTestAttachment(path, $"{actor}'s page at failure");
-            }
-            catch (PlaywrightException error)
-            {
-                TestContext.Progress.WriteLine($"Screenshot unavailable for {actor}: {error.Message}");
-            }
+                Path = path,
+                FullPage = true,
+                Timeout = 5_000,
+                Mask = [page.GetByTestId("password")]
+            });
+            TestContext.AddTestAttachment(path, $"{actor} — {checkpoint}");
+        }
+        catch (PlaywrightException error)
+        {
+            TestContext.Progress.WriteLine($"Screenshot unavailable for {actor} at {checkpoint}: {error.Message}");
         }
     }
 }

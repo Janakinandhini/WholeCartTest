@@ -45,6 +45,8 @@ Key findings:
 |---|---|
 | `MultiSellerCheckoutCreatesTwoOrdersThatCanBeDeliveredAndInvoiced` | Buyer adds cases from two sellers, verifies checkout totals and a delivery slot, and creates two sub-orders from one checkout. Each seller independently accepts, ships and delivers its sub-order. Buyer history shows each transition and each invoice matches its order total. Covers BR-05, BR-07–09, BR-13, BR-19 and BR-22. |
 | `SellerCancellationOfAcceptedOrderAppearsInBuyerHistory` | A seller accepts and cancels a newly placed order. The buyer sees the same status in history and on the order detail page. Regression for BR-12/13 and DEF-22. |
+| `BuyerCancelsNewOrderAndStockReturnsToItsOriginalPieceCount` | Checkout deducts the exact number of pieces ordered. Immediate buyer cancellation updates history and restores the original piece count (BR-01, BR-11). |
+| `CheckoutRejectsOneSellerBelowMinimumEvenWhenCartTotalQualifies` | Checkout explains the per-seller ₹2,000 net minimum and creates no sub-orders when one seller falls below it, even though the combined cart qualifies (CR-07, DEF-12). |
 | `TestBuyerLoginAndNavigation` | Buyer reaches authenticated navigation and opens the catalogue. |
 
 ### Set up and run
@@ -75,14 +77,25 @@ Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. 
 
 ### Test data and diagnostics
 
-The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation, and the sellers assigned to the two SKUs below. Start with both buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+The suite uses separate browser sessions for each actor. It uses `buyer1` for fulfilment, `buyer2` for cancellation, `buyer3` for minimum-order validation, and the sellers assigned to the two SKUs below. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
 
 | SKU | Product | Seller |
 |---|---|---|
 | SKU-0381 | Chef's Cold Coffee | FreshFarm Foods (`seller2`) |
 | SKU-0392 | Daily Iced Tea | Coastal Beverages (`seller3`) |
 
-Run against the assigned test instance. The tests run serially, create real test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. If a run stops before checkout, remove the test items left in that buyer's cart before rerunning. A cancellation status mismatch fails the test and should be compared with DEF-22. A failing run attaches browser screenshots for the active actors to the results.
+Run against the assigned test instance. The tests run serially, create real test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. The minimum-order rejection leaves its items in `buyer3`'s cart. Clear those items before rerunning that case. If a run stops before checkout, clear any test items that remain in that buyer's cart. Compare rejection and cancellation failures with DEF-12 and DEF-22.
+
+### Save screenshots and video
+
+Screenshots are saved automatically at checkout, delivery, invoice, cancellation, stock and validation checkpoints. Failed tests also capture the current page of each actor. Use the command below to save screenshots and WebM recordings from every browser session in a known folder.
+
+```bash
+WHOLECART_VIDEO=1 WHOLECART_EVIDENCE_DIR="$PWD/TestResults/evidence" \
+  dotnet test automation/WholeCart.Automation --results-directory TestResults --logger "trx;LogFileName=wholecart.trx"
+```
+
+Each run has its own folder with a subfolder per test. Playwright finalizes the video at the end of each test. Without an explicit `WHOLECART_EVIDENCE_DIR`, the test prints the evidence path under its NUnit working directory. `TestResults/` is ignored by Git.
 
 ## Test Accounts
 
