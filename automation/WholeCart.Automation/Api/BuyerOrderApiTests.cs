@@ -100,7 +100,8 @@ public class BuyerOrderApiTests
         var settings = TestSettings.FromEnvironment();
         _api = new WholeCartApi(settings.BaseUrl);
         await _api.SignInAsync(buyer, settings.Password);
-        Assert.That(await _api.GetCartAsync(), Is.Empty, $"Start with an empty cart for {buyer}.");
+        await _api.ClearCartAsync();
+        Assert.That(await _api.GetCartAsync(), Is.Empty, $"Expected an empty cart after clearing it for {buyer}.");
         return _api;
     }
 

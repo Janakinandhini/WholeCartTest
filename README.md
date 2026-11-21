@@ -74,16 +74,7 @@ dotnet build automation/WholeCart.Automation
 pwsh automation/WholeCart.Automation/bin/Debug/net8.0/playwright.ps1 install chromium
 ```
 
-Set `WHOLECART_PASSWORD` in your shell using the password from the assignment email. In bash or zsh, this prompts without echoing the password.
-
-```bash
-printf 'WholeCart test password: '
-read -rs WHOLECART_PASSWORD
-printf '\n'
-export WHOLECART_PASSWORD
-```
-
-Run the full suite with one command.
+Run the full suite with one command. The suite loads the shared assignment password from the JSON test data.
 
 ```bash
 dotnet test automation/WholeCart.Automation --results-directory TestResults --logger "trx;LogFileName=wholecart.trx"
@@ -94,19 +85,19 @@ Set `WHOLECART_BASE_URL` to the updated candidate URL when testing a new build. 
 To run the two operator tests, use `--filter 'TestCategory=Operator'`.
 To run the WholeCart Direct redelivery regression, use `--filter 'TestCategory=Redelivery'`.
 
-Run only the API tests with `WHOLECART_PASSWORD` set.
+Run only the API tests.
 
 ```bash
 dotnet test automation/WholeCart.Automation --filter 'TestCategory=Api' --results-directory TestResults --logger "trx;LogFileName=wholecart-api.trx"
 ```
 
-Start with empty carts for `buyer1` and `buyer2`. The API tests remove the cart lines they add. The checkout test leaves its cancelled order in history. The API tests look for slots starting tomorrow in India. If the operator has fixed the test store clock to a different date, set `WHOLECART_STORE_DATE` to that date in `yyyy-MM-dd` format. Checkout responses are saved as test attachments under the same evidence root as the browser tests.
+The API tests clear existing items from their assigned buyer carts before checkout and remove remaining test items after execution. The checkout test leaves its cancelled order in history. The API tests look for slots starting tomorrow in India. If the operator has fixed the test store clock to a different date, set `WHOLECART_STORE_DATE` to that date in `yyyy-MM-dd` format. Checkout responses are saved as test attachments under the same evidence root as the browser tests.
 
 ### Test data and diagnostics
 
-The UI and API tests load account names, product fixtures, and checkout amounts from [TestData/wholecart.json](automation/WholeCart.Automation/TestData/wholecart.json). Update that file if the assigned build uses different test data. The build copies it into the test output directory. Set the password separately through `WHOLECART_PASSWORD`.
+The UI and API tests load account names, the shared assignment password, product fixtures, and checkout amounts from [TestData/wholecart.json](automation/WholeCart.Automation/TestData/wholecart.json). The build copies it into the test output directory. To use a different password for another test instance, set `WHOLECART_PASSWORD` as an override.
 
-The suite uses separate browser sessions for all seven accounts. It uses `buyer1` for fulfilment and redelivery, `buyer2` for cancellation and logistics orders, `buyer3` for minimum-order validation, the three sellers listed below, and `operator` for dispatch and seller navigation. Start with all three buyer carts empty. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
+The suite uses separate browser sessions for all seven accounts. It uses `buyer1` for fulfilment and redelivery, `buyer2` for cancellation and logistics orders, `buyer3` for minimum-order validation, the three sellers listed below, and `operator` for dispatch and seller navigation. Before building a browser test cart, the suite removes each existing line by setting its quantity to zero and clicking **Update**. The tests calculate case quantities from the published prices, check stock before adding to the cart, and choose a future date with an enabled delivery slot using the application's calendar.
 
 | Catalogue search | Product | Seller |
 |---|---|---|
@@ -114,7 +105,7 @@ The suite uses separate browser sessions for all seven accounts. It uses `buyer1
 | SKU-0392 | Daily Iced Tea | Coastal Beverages (`seller3`) |
 | Hill Toor Dal | Hill Toor Dal | WholeCart Direct (`seller1`) |
 
-Run against the assigned test instance. The tests run serially, create real test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. The minimum-order rejection leaves its items in `buyer3`'s cart. Clear those items before rerunning that case. If a run stops before checkout, clear any test items that remain in that buyer's cart. Compare rejection and cancellation failures with DEF-12 and DEF-22.
+Run against the assigned test instance. The tests run serially, create test orders, and leave order history available for inspection. Delivered test orders consume stock and may use delivery capacity. Compare rejection and cancellation failures with DEF-12 and DEF-22.
 
 ### Save screenshots and video
 
@@ -139,7 +130,7 @@ Each run has its own folder with a subfolder per test. Playwright finalizes the 
 | Seller | seller3 | Coastal Beverages |
 | Operator | operator | — |
 
-Use the shared test password from the assignment email.
+The JSON test data contains the shared assignment password.
 
 ## AI Tools Used
 

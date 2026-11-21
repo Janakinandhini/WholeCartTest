@@ -67,13 +67,39 @@ internal sealed class WholeCartUi(IPage page)
     public async Task RequireEmptyCartAsync()
     {
         await OpenAsync("Cart", "Cart");
+        await ExpectCartEmptyAsync();
+    }
+
+    public async Task ClearCartAsync()
+    {
+        await OpenAsync("Cart", "Cart");
+        var rows = CartItemRows();
+        for (var remaining = await rows.CountAsync(); remaining > 0; remaining--)
+        {
+            var row = rows.First;
+            await QuantityInput(row).FillAsync("0");
+            await row.GetByRole(AriaRole.Button, new() { Name = "Update", Exact = true }).ClickAsync();
+            await Expect(rows, "Updating the quantity to zero should remove exactly one cart line.")
+                .ToHaveCountAsync(remaining - 1);
+        }
+
+        await ExpectCartEmptyAsync();
+    }
+
+    private async Task ExpectCartEmptyAsync()
+    {
         await Expect(Control(new Regex("^Proceed to checkout$")), "Expected an empty test account cart.")
             .ToHaveCountAsync(0);
-        await Expect(page.Locator("main table tbody tr").Filter(new()
-        {
-            Has = page.Locator("input[type=number], select")
-        }), "The cart must have no existing product lines.").ToHaveCountAsync(0);
+        await Expect(CartItemRows(), "The cart must have no existing product lines.").ToHaveCountAsync(0);
     }
+
+    private ILocator CartItemRows() => page.Locator("main table tbody tr").Filter(new()
+    {
+        Has = page.GetByRole(AriaRole.Cell, new()
+        {
+            NameRegex = new Regex(@"^(?:case|piece)$", RegexOptions.IgnoreCase)
+        })
+    });
 
     public Task<CartLine> AddCasesAsync(Product product, decimal minimumNet) =>
         AddToCartAsync(product, "case", price => (int)Math.Ceiling(minimumNet / price));
@@ -112,7 +138,7 @@ internal sealed class WholeCartUi(IPage page)
         var form = page.Locator("form").Filter(new() { Has = Button("Add to cart") });
         var label = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(unit);
         await form.GetByRole(AriaRole.Combobox).SelectOptionAsync(new SelectOptionValue { Label = label });
-        await form.GetByRole(AriaRole.Spinbutton).FillAsync(quantity.ToString(CultureInfo.InvariantCulture));
+        await QuantityInput(form).FillAsync(quantity.ToString(CultureInfo.InvariantCulture));
         await Button("Add to cart").ClickAsync();
         await OpenAsync("Cart", "Cart");
         var line = new CartLine(product, unit, quantity, quantity * price, ParseDecimal(taxRate.Groups[1].Value),
@@ -125,7 +151,7 @@ internal sealed class WholeCartUi(IPage page)
     {
         var row = ProductUnitRow(line);
         await Expect(row).ToBeVisibleAsync();
-        await Expect(row.Locator("input[type=number], select"))
+        await Expect(QuantityInput(row).Or(row.GetByRole(AriaRole.Combobox)))
             .ToHaveValueAsync(line.Quantity.ToString(CultureInfo.InvariantCulture));
         await Expect(row.GetByRole(AriaRole.Cell).Last).ToHaveTextAsync(MoneyText(line.Net));
     }
@@ -445,6 +471,9 @@ internal sealed class WholeCartUi(IPage page)
     {
         Has = page.GetByRole(AriaRole.Cell, new() { Name = line.Unit, Exact = true })
     });
+
+    private static ILocator QuantityInput(ILocator scope) =>
+        scope.GetByRole(AriaRole.Spinbutton).Or(scope.GetByRole(AriaRole.Textbox));
 
     private static string StatusPattern(string status) =>
         string.Join(@"[\s_-]+", status.Split(' ').Select(Regex.Escape));

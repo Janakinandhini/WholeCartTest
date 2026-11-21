@@ -118,9 +118,24 @@ internal sealed class WholeCartApi(Uri baseUrl) : IDisposable
             if (!addedProductIds.Contains(id) || Text(item, "unit") != "case")
                 continue;
 
-            var response = await SendAsync(HttpMethod.Delete, $"api/cart/items?product_id={id}&unit=case");
-            response.RequireStatus(HttpStatusCode.OK, HttpStatusCode.NoContent);
+            await DeleteCartLineAsync(id, "case");
         }
+    }
+
+    public async Task ClearCartAsync()
+    {
+        foreach (var item in await GetCartAsync())
+        {
+            var unit = Text(item, "unit") ?? throw new AssertionException("The cart line has no unit.");
+            await DeleteCartLineAsync(ProductId(item), unit);
+        }
+    }
+
+    private async Task DeleteCartLineAsync(int productId, string unit)
+    {
+        var response = await SendAsync(HttpMethod.Delete,
+            $"api/cart/items?product_id={productId}&unit={Uri.EscapeDataString(unit)}");
+        response.RequireStatus(HttpStatusCode.OK, HttpStatusCode.NoContent);
     }
 
     public static int ProductId(JsonElement item) =>

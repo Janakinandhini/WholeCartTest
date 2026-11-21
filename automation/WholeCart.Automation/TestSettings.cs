@@ -16,7 +16,7 @@ internal sealed record TestSettings(Uri BaseUrl, string Password)
 
         var password = Environment.GetEnvironmentVariable("WHOLECART_PASSWORD");
         if (string.IsNullOrWhiteSpace(password))
-            throw new InvalidOperationException("Set WHOLECART_PASSWORD to the assignment test password.");
+            password = WholeCartTestData.Current.Password;
 
         return new TestSettings(baseUrl, password);
     }

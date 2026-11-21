@@ -1,4 +1,5 @@
 {
+  "password": "Test@123",
   "buyers": {
     "buyer1": {
       "username": "buyer1",

@@ -100,7 +100,7 @@ public class OrderFlowTests
         var freshFarm = await SignInAsync(Coffee.SellerAccount);
         var coastal = await SignInAsync(Tea.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var coffeeLine = await buyer.AddCasesAsync(Coffee, Data.Checkout.FreeDeliveryNet);
         var teaLine = await buyer.AddCasesAsync(Tea, Data.Checkout.FreeDeliveryNet);
@@ -141,7 +141,7 @@ public class OrderFlowTests
         var username = Data.Buyers.Buyer1.Username;
         var buyer = await SignInAsync(username);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var cases = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         var pieceQuantity = Data.Checkout.MixedCartPieceQuantity;
@@ -173,7 +173,7 @@ public class OrderFlowTests
         var buyer = await SignInAsync(Data.Buyers.Buyer2.Username);
         var seller = await SignInAsync(Coffee.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         Assert.That(line.StockBefore, Is.GreaterThan(line.Pieces),
@@ -208,7 +208,7 @@ public class OrderFlowTests
     {
         var buyer = await SignInAsync(Data.Buyers.Buyer3.Username);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var belowMinimum = await buyer.AddCasesAsync(Coffee, Data.Checkout.BelowMinimumNetTarget);
         var qualifying = await buyer.AddCasesAsync(Tea, Data.Checkout.MinimumOrderNet);
@@ -230,7 +230,7 @@ public class OrderFlowTests
         var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
         var seller = await SignInAsync(Tea.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var line = await buyer.AddCasesAsync(Tea, Data.Checkout.MinimumOrderNet);
         var originalSlot = await buyer.OpenCheckoutAsync(Tea.Name);
@@ -261,7 +261,7 @@ public class OrderFlowTests
     {
         var buyer = await SignInAsync(Data.Buyers.Buyer2.Username);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         Assert.That(line.StockBefore, Is.GreaterThan(line.Pieces),
@@ -290,7 +290,7 @@ public class OrderFlowTests
         var seller = await SignInAsync(Coffee.SellerAccount);
         var dispatcher = await SignInAsync(Data.OperatorAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var line = await buyer.AddCasesAsync(Coffee, Data.Checkout.MinimumOrderNet);
         var slot = await buyer.OpenCheckoutAsync(Coffee.Name);
@@ -341,7 +341,7 @@ public class OrderFlowTests
         var buyer = await SignInAsync(Data.Buyers.Buyer1.Username);
         var seller = await SignInAsync(ToorDal.SellerAccount);
         var previousOrders = await buyer.ReadOrderNumbersAsync();
-        await buyer.RequireEmptyCartAsync();
+        await buyer.ClearCartAsync();
 
         var line = await buyer.AddCasesAsync(ToorDal, Data.Checkout.MinimumOrderNet);
         var originalSlot = await buyer.OpenCheckoutAsync(ToorDal.Name);

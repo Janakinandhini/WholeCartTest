@@ -22,6 +22,7 @@ internal sealed record CheckoutFixture(decimal MinimumOrderNet, decimal FreeDeli
 }
 
 internal sealed record WholeCartTestData(
+    string Password,
     BuyerFixtures Buyers,
     string OperatorAccount,
     ProductFixtures Products,
@@ -37,6 +38,9 @@ internal sealed record WholeCartTestData(
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         }) ?? throw new InvalidOperationException($"Test data is empty in {path}.");
+
+        if (string.IsNullOrWhiteSpace(data.Password))
+            throw new InvalidOperationException($"The assignment test password is missing in {path}.");
 
         if (data.Checkout is null ||
             data.Checkout.BelowMinimumNetTarget <= 0 ||
